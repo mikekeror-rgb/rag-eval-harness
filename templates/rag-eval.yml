@@ -1,0 +1,39 @@
+name: rag-eval
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  retrieval:
+    # Fast and free: no judge model, runs on every PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt deepeval openai
+      - run: python evals/run_eval.py --retrieval-only --min-hit 0.75
+
+  full:
+    # Judge-scored run on main only, to save free-tier quota
+    if: github.ref == 'refs/heads/main'
+    needs: retrieval
+    runs-on: ubuntu-latest
+    env:
+      JUDGE_BASE_URL: https://api.groq.com/openai/v1
+      JUDGE_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      JUDGE_MODEL: ${{ vars.JUDGE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt deepeval openai
+      - run: python evals/run_eval.py --min-hit 0.75 --min-faithfulness 0.80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-results
+          path: evals/results.md

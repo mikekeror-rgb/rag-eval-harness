@@ -1,0 +1,4 @@
+{"id": "q001", "question": "<single-fact question answerable from one chunk>", "expected_answer": "<answer written from the source document>", "relevant_ids": ["<source_file>#<chunk_index>"], "type": "lookup"}
+{"id": "q002", "question": "<question that needs a figure from one chunk and a rule from another>", "expected_answer": "<worked answer from the documents>", "relevant_ids": ["<source_file>#<chunk_a>", "<source_file>#<chunk_b>"], "type": "calculation"}
+{"id": "q003", "question": "<question connecting two separate sections or documents>", "expected_answer": "<answer>", "relevant_ids": ["<doc_1>#<chunk>", "<doc_2>#<chunk>"], "type": "multi_hop"}
+{"id": "q004", "question": "<plausible question the corpus does NOT cover>", "expected_answer": "The documents do not cover this.", "relevant_ids": [], "type": "out_of_scope"}
