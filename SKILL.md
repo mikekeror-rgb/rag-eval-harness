@@ -88,7 +88,7 @@ The script computes, per question and averaged:
 
 Citation validity is checked **before** the judge call: an answer citing `[7]` when only 5 chunks were retrieved is wrong regardless of what the judge says.
 
-Every run also writes `evals/results.jsonl`: one line per question with the answer, the retrieved ids and text, and the scores. Keep it. It lets you re-score a run with a fixed metric, or a different judge, without paying to regenerate the answers.
+Every run also writes `evals/results.jsonl`: one line per question with the answer, the retrieved ids and text, and the scores. Both files are rewritten after every question, so a run that dies part-way (rate limit, timeout) still leaves results, marked PARTIAL. A question whose app call fails is recorded with its error, listed in `results.md`, excluded from the averages, and makes the run exit non-zero: averages over only the questions that worked would otherwise look better than the app is. Keep it. It lets you re-score a run with a fixed metric, or a different judge, without paying to regenerate the answers.
 
 ## Step 6 - Check the metrics before you trust them
 

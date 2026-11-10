@@ -125,10 +125,18 @@ def main():
     judge = None if args.retrieval_only else build_judge()
     rows, log = [], []
     for item in golden:
-        out = answer(item["question"])
+        row = {"id": item["id"], "type": item.get("type", "lookup")}
+        try:
+            out = answer(item["question"])
+        except Exception as e:  # rate limit, timeout, app bug: record it and keep going
+            row["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+            rows.append(row)
+            log.append({**row, "question": item["question"]})
+            print(f"{row['id']}: ERROR {row['error'][:120]}", flush=True)
+            write_outputs(rows, log, args, len(golden))
+            continue
         hit, rr = retrieval_scores(out["context_ids"], item.get("relevant_ids", []), args.k)
-        row = {"id": item["id"], "type": item.get("type", "lookup"), "hit": hit, "mrr": rr,
-               "citation": citation_valid(out["answer"], len(out["contexts"]))}
+        row.update({"hit": hit, "mrr": rr, "citation": citation_valid(out["answer"], len(out["contexts"]))})
         if item.get("type") == "out_of_scope":
             row["refused"] = float(is_refusal(out["answer"]))
         else:
@@ -140,32 +148,16 @@ def main():
         rows.append(row)
         log.append({**row, "question": item["question"], "answer": out["answer"],
                     "context_ids": out["context_ids"], "contexts": out["contexts"]})
-        print(f"{row['id']}: hit={hit} mrr={rr} faith={row.get('faithfulness')}")
+        print(f"{row['id']}: hit={hit} mrr={rr} faith={row.get('faithfulness')}", flush=True)
+        write_outputs(rows, log, args, len(golden))  # a crash later still leaves results on disk
 
-    metrics = ["hit", "mrr", "faithfulness", "relevancy", "citation", "refused", "false_refusal"]
-    overall = {m: mean(r.get(m) for r in rows) for m in metrics}
-    by_type = defaultdict(list)
-    for r in rows:
-        by_type[r["type"]].append(r)
-
-    lines = [f"# RAG eval results\n\n{len(rows)} questions, k={args.k}\n",
-             "| Slice | " + " | ".join(metrics) + " |",
-             "|---|" + "---|" * len(metrics),
-             "| **all** | " + " | ".join(str(overall[m]) for m in metrics) + " |"]
-    for t, rs in sorted(by_type.items()):
-        lines.append(f"| {t} ({len(rs)}) | " +
-                     " | ".join(str(mean(r.get(m) for r in rs)) for m in metrics) + " |")
-    errors = [(r["id"], e) for r in rows for e in r.get("judge_errors", [])]
-    if errors:
-        lines.append(f"\nJudge failures ({len(errors)}): " + ", ".join(f"{i} {e}" for i, e in errors))
-    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    # Per-question log: re-score later (fixed metric, other judge) without regenerating answers.
-    with open(Path(args.out).with_suffix(".jsonl"), "w", encoding="utf-8") as f:
-        for entry in log:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    overall, lines = write_outputs(rows, log, args, len(golden))
     print("\n".join(lines))
 
     failed = []
+    errored = [r["id"] for r in rows if "error" in r]
+    if errored:  # averages skip errored questions, so a run with errors must not pass
+        failed.append(f"{len(errored)} question(s) errored: {', '.join(errored)}")
     if args.min_hit is not None and (overall["hit"] or 0) < args.min_hit:
         failed.append(f"hit {overall['hit']} < {args.min_hit}")
     if args.min_faithfulness is not None and (overall["faithfulness"] or 0) < args.min_faithfulness:
@@ -175,6 +167,38 @@ def main():
     if failed:
         print("QUALITY GATE FAILED: " + "; ".join(failed))
         sys.exit(1)
+
+
+METRICS = ["hit", "mrr", "faithfulness", "relevancy", "citation", "refused", "false_refusal"]
+
+
+def write_outputs(rows, log, args, total):
+    """Write results.md (summary) and results.jsonl (per question) for the rows so far."""
+    overall = {m: mean(r.get(m) for r in rows) for m in METRICS}
+    by_type = defaultdict(list)
+    for r in rows:
+        by_type[r["type"]].append(r)
+    status = f"{len(rows)} questions" if len(rows) == total else f"PARTIAL: {len(rows)} of {total} questions so far"
+    lines = [f"# RAG eval results\n\n{status}, k={args.k}\n",
+             "| Slice | " + " | ".join(METRICS) + " |",
+             "|---|" + "---|" * len(METRICS),
+             "| **all** | " + " | ".join(str(overall[m]) for m in METRICS) + " |"]
+    for t, rs in sorted(by_type.items()):
+        lines.append(f"| {t} ({len(rs)}) | " +
+                     " | ".join(str(mean(r.get(m) for r in rs)) for m in METRICS) + " |")
+    app_errors = [r for r in rows if "error" in r]
+    if app_errors:
+        lines.append(f"\nErrored, excluded from the averages ({len(app_errors)}): "
+                     + "; ".join(f"{r['id']} {r['error'][:80]}" for r in app_errors))
+    judge_errors = [(r["id"], e) for r in rows for e in r.get("judge_errors", [])]
+    if judge_errors:
+        lines.append(f"\nJudge failures ({len(judge_errors)}): " + ", ".join(f"{i} {e}" for i, e in judge_errors))
+    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Per-question log: re-score later (fixed metric, other judge) without regenerating answers.
+    with open(Path(args.out).with_suffix(".jsonl"), "w", encoding="utf-8") as f:
+        for entry in log:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return overall, lines
 
 
 if __name__ == "__main__":
