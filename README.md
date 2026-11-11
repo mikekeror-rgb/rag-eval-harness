@@ -15,6 +15,8 @@ With the metrics fixed, a retrieval-only harness (no model, no judge, about 30 s
 
 Those problems were found with the project's own harness. This skill packages the checks that caught them (Steps 6 and 7 of `SKILL.md`), so they run as part of the default workflow.
 
+The negative controls then found a problem in the harness's own judge. On their first run on the same app, 2 of 4 pairs failed: DeepEval's faithfulness metric by default counts claims the context neither supports nor contradicts as faithful, so an invented fee and a near-miss passage both scored 1.0. With those claims counted as unfaithful, and faithfulness no longer scored for refusals, all 4 pairs behave as expected on two consecutive runs.
+
 ## What the skill does
 
 When you ask Claude Code to evaluate, benchmark or regression-test a RAG app, it:
@@ -34,7 +36,7 @@ When you ask Claude Code to evaluate, benchmark or regression-test a RAG app, it
 | Refusal rate | Were out-of-scope questions refused? | No |
 | False-refusal rate | Were answerable questions refused? | No |
 
-6. Checks every metric can fail, moves when it should, and doesn't reward refusals, and measures the noise floor with an identical rerun.
+6. Checks every metric can fail, moves when it should, and doesn't reward refusals, measures the noise floor with an identical rerun, and runs **negative controls**: clean/broken pairs where the clean twin must pass and the broken twin must fail with its own signature, so a judge that accepts everything and one that rejects everything are both caught.
 7. Compares changes as paired runs, with per-question flips and intervals, one change at a time.
 8. Optionally adds a GitHub Actions gate: retrieval-only metrics on every PR, the judged run on `main`.
 
@@ -58,6 +60,7 @@ To run the script on its own, put `scripts/run_eval.py` in `evals/` next to an `
 pip install deepeval openai
 python evals/run_eval.py --retrieval-only --min-hit 0.75            # fast, no judge
 python evals/run_eval.py --min-faithfulness 0.8 --max-false-refusal 0.05
+python evals/run_eval.py --controls evals/negative_controls.jsonl         # test the metrics and judge
 ```
 
 ## Files
@@ -67,6 +70,7 @@ python evals/run_eval.py --min-faithfulness 0.8 --max-false-refusal 0.05
 | `SKILL.md` | The workflow Claude Code follows |
 | `scripts/run_eval.py` | Metrics, results table, per-question log, quality gate |
 | `templates/golden_set.jsonl` | Golden-set format: lookup, calculation, multi-hop, out-of-scope |
+| `templates/negative_controls.jsonl` | Negative-control pairs, one per kind |
 | `templates/rag-eval.yml` | GitHub Actions workflow |
 
 ## License

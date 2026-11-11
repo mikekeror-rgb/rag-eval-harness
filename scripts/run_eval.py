@@ -4,6 +4,7 @@ Usage:
   python evals/run_eval.py --golden evals/golden_set.jsonl --k 5
   python evals/run_eval.py --retrieval-only --min-hit 0.8      # fast CI mode, no judge
   python evals/run_eval.py --max-false-refusal 0.05            # also gate on refusing answerable questions
+  python evals/run_eval.py --controls evals/negative_controls.jsonl   # test the metrics and judge themselves
 
 Expects evals/rag_adapter.py exposing answer(question) -> {answer, contexts, context_ids}.
 """
@@ -88,9 +89,23 @@ def judge_scores(item, out, judge):
     tc = LLMTestCase(input=item["question"], actual_output=out["answer"],
                      expected_output=item.get("expected_answer"),
                      retrieval_context=out["contexts"])
-    scores = {}
-    for name, metric in [("faithfulness", FaithfulnessMetric(model=judge, async_mode=False)),
-                         ("relevancy", AnswerRelevancyMetric(model=judge, async_mode=False))]:
+    scores, metrics = {}, []
+    if is_refusal(out["answer"]):
+        # A refusal makes no claim about the context, so faithfulness is undefined for it:
+        # by default the judge scores it 1.0 (rewarding refusals), strictly it scores 0.0
+        # (punishing correct ones). Judge refusals with the refusal metrics instead.
+        scores["faithfulness"] = None
+    else:
+        # By default DeepEval passes "borderline" claims, ones the context neither supports
+        # nor contradicts, so an invented fee scores as faithful. Count them as unfaithful.
+        try:
+            faithfulness = FaithfulnessMetric(model=judge, async_mode=False, penalize_ambiguous_claims=True)
+        except TypeError:  # older DeepEval without the option
+            faithfulness = FaithfulnessMetric(model=judge, async_mode=False)
+            scores.setdefault("judge_errors", []).append("faithfulness: DeepEval too old to penalize unsupported claims")
+        metrics.append(("faithfulness", faithfulness))
+    metrics.append(("relevancy", AnswerRelevancyMetric(model=judge, async_mode=False)))
+    for name, metric in metrics:
         for attempt in range(2):  # small judges often emit malformed JSON
             try:
                 metric.measure(tc)
@@ -117,7 +132,11 @@ def main():
     p.add_argument("--min-hit", type=float)
     p.add_argument("--min-faithfulness", type=float)
     p.add_argument("--max-false-refusal", type=float)
+    p.add_argument("--controls", help="negative-control pairs (JSONL): score them and exit, no app calls")
     args = p.parse_args()
+
+    if args.controls:
+        sys.exit(run_controls(args.controls, Path(args.out).with_name("controls.md")))
 
     from rag_adapter import answer
 
@@ -199,6 +218,78 @@ def write_outputs(rows, log, args, total):
         for entry in log:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return overall, lines
+
+
+
+# ---------------------------------------------------------------------------
+# Negative controls: test the metrics and the judge, not the app.
+# Each control is a pair scored from fixed inputs. The clean twin must pass and the
+# broken twin must fail with its own signature, so a judge that accepts everything
+# fails the broken halves and a judge that rejects everything fails the clean halves.
+# ---------------------------------------------------------------------------
+
+CONTROL_SIGNATURES = {
+    # broken: the gold chunk replaced by a plausible but irrelevant one; answer unchanged
+    "irrelevant_passage": {"clean": {"hit": "==1", "faithfulness": ">=0.8"},
+                           "broken": {"hit": "==0", "faithfulness": "<=0.5"}},
+    # broken: the decisive evidence removed and the answer is a refusal. That is a retrieval
+    # miss (hit 0), not a generation fault like wrong_refusal (hit 1): the refusal is correct.
+    "missing_evidence": {"clean": {"hit": "==1", "false_refusal": "==0", "faithfulness": ">=0.8"},
+                         "broken": {"hit": "==0", "false_refusal": "==1"}},
+    # broken: an unsupported claim (e.g. an invented fee) added to a correct answer
+    "unsupported_claim": {"clean": {"faithfulness": ">=0.8", "relevancy": ">=0.7"},
+                          "broken": {"faithfulness": "<=0.75", "relevancy": ">=0.7"}},
+    # broken: a refusal although the evidence was retrieved
+    "wrong_refusal": {"clean": {"false_refusal": "==0", "relevancy": ">=0.7"},
+                      "broken": {"false_refusal": "==1", "relevancy": "<=0.5"}},
+}
+_CONDITION = re.compile(r"^(==|<=|>=|<|>)\s*(-?[0-9.]+)$")
+
+
+def check(value, condition):
+    op, num = _CONDITION.match(condition).groups()
+    if value is None:
+        return False
+    num = float(num)
+    return {"==": value == num, "<=": value <= num, ">=": value >= num, "<": value < num, ">": value > num}[op]
+
+
+def score_variant(control, variant, judge):
+    """All metrics for one twin, from its fixed answer and contexts."""
+    v = control[variant]
+    hit, _ = retrieval_scores(v["context_ids"], control.get("relevant_ids", []), len(v["context_ids"]))
+    scores = {"hit": hit, "false_refusal": float(is_refusal(v["answer"]))}
+    scores.update(judge_scores(control, {"answer": v["answer"], "contexts": v["contexts"]}, judge))
+    return scores
+
+
+def run_controls(path, out_path):
+    controls = load_golden(path)
+    judge = build_judge()
+    lines = ["# Negative controls\n", f"{len(controls)} pairs. Clean twin must pass; broken twin must fail with its signature.\n",
+             "| Control | Kind | Clean | Broken | Failed checks |", "|---|---|---|---|---|"]
+    failures = 0
+    for c in controls:
+        expect = {**CONTROL_SIGNATURES.get(c["kind"], {}), **c.get("expect", {})}
+        if not expect:
+            sys.exit(f"{c['id']}: unknown kind {c['kind']!r} and no 'expect' given")
+        results, bad = {}, []
+        for variant in ("clean", "broken"):
+            s = score_variant(c, variant, judge)
+            results[variant] = all(check(s.get(m), cond) for m, cond in expect[variant].items())
+            bad += [f"{variant} {m}={s.get(m)} (want {cond})" for m, cond in expect[variant].items() if not check(s.get(m), cond)]
+            if s.get("judge_errors"):
+                bad.append(f"{variant} judge errors: {s['judge_errors']}")
+        failures += not (results["clean"] and results["broken"])
+        lines.append(f"| {c['id']} | {c['kind']} | {'pass' if results['clean'] else 'FAIL'} | "
+                     f"{'fails as expected' if results['broken'] else 'WRONG SIGNATURE'} | {'; '.join(bad) or '-'} |")
+        print(lines[-1], flush=True)
+    lines.append(f"\n{len(controls) - failures} of {len(controls)} control pairs behave as expected.")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(lines[-1])
+    if failures:
+        print("CONTROLS FAILED: the metrics or judge no longer catch what they should.")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

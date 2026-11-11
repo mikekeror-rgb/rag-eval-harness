@@ -33,7 +33,10 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt deepeval openai
       - run: python evals/run_eval.py --min-hit 0.75 --min-faithfulness 0.80
+      - run: python evals/run_eval.py --controls evals/negative_controls.jsonl   # the judge still catches what it should
       - uses: actions/upload-artifact@v4
         with:
           name: rag-eval-results
-          path: evals/results.md
+          path: |
+            evals/results.md
+            evals/controls.md

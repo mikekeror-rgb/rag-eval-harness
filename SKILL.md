@@ -17,6 +17,8 @@ evals/
   run_eval.py           # copied from this skill's scripts/
   results.md            # metrics table, regenerated on every run
   results.jsonl         # per-question answers, retrieved ids and scores, for re-scoring
+  negative_controls.jsonl  # clean/broken pairs that test the metrics and judge themselves
+  controls.md           # which control pairs behaved as expected
 .github/workflows/rag-eval.yml   # optional CI gate
 ```
 
@@ -80,7 +82,7 @@ The script computes, per question and averaged:
 |---|---|---|
 | Hit@k | Did any relevant chunk make the top k? | No |
 | MRR | How high was the first relevant chunk? | No |
-| Faithfulness | Is every claim supported by retrieved context? | Yes |
+| Faithfulness | Is every claim supported by retrieved context? Not scored for refusals | Yes |
 | Answer relevancy | Does the answer address the question? | Yes |
 | Citation validity | Do `[N]` markers point to chunks that exist? | No |
 | Refusal rate | Did out-of-scope questions get refused? | No (keyword check) |
@@ -99,6 +101,18 @@ A metric that can't fail looks like good news. Before reading any result, check 
 3. **Does it reward refusals?** Faithfulness judges score "I don't know" as fully supported, so a system that refuses more looks *more* faithful. Always report the false-refusal rate on answerable questions next to faithfulness and next to the out-of-scope refusal rate. Either one alone rewards refusing everything.
 4. **Is the check stricter than the thing it checks?** Exact string matching on citations rejects correct answers that copy an id with different spacing or spelling. Normalise case, whitespace and punctuation before comparing, and count *invented* citations (an id that exists nowhere in the corpus) separately from *unverifiable* ones (real, but not retrieved for this question).
 5. **What is the noise floor?** Run the identical configuration twice. Differences smaller than the rerun's flips are not results.
+6. **Run negative controls.** Checks 1 to 5 find problems by reading results; controls test the metrics directly. Each control is a pair scored from fixed inputs, with no app call: the clean twin must pass and the broken twin must fail with its own signature, so a judge that accepts everything fails the broken halves and one that rejects everything fails the clean halves. Build one pair of each kind from your own corpus (format in `templates/negative_controls.jsonl`):
+
+| Kind | Broken twin | Must show |
+|---|---|---|
+| `irrelevant_passage` | gold chunk replaced by a near miss (same topic and wording, different rule) | hit 0, faithfulness ≤ 0.5 |
+| `missing_evidence` | decisive evidence removed, answer is a refusal | hit 0 and refused: a retrieval miss, not a generation fault |
+| `unsupported_claim` | an on-topic claim the chunk never makes, e.g. an invented fee | faithfulness ≤ 0.75, relevancy still ≥ 0.7 |
+| `wrong_refusal` | a refusal although the gold chunk was retrieved | false refusal flagged, relevancy ≤ 0.5 |
+
+   Check in code that a broken twin's invented claim really is absent from its context, and keep it on topic, or it fails for the wrong reason. Run `python evals/run_eval.py --controls evals/negative_controls.jsonl`; it writes `evals/controls.md` and exits non-zero if any pair misbehaves. Run it in CI and after any judge, prompt or DeepEval upgrade, since that is when a judge quietly starts rewarding refusals again.
+
+   On a real legal RAG app, the first run of these controls failed 2 of 4: DeepEval's faithfulness metric by default counts claims the context neither supports nor contradicts as faithful, so an invented fee and a near-miss passage both scored 1.0. `run_eval.py` now counts those claims as unfaithful, and does not score faithfulness for refusals at all (by default a refusal scores 1.0; strictly it scores 0.0, punishing correct ones), leaving refusals to the refusal and false-refusal checks.
 
 ## Step 7 - Change one thing, measure it properly
 
